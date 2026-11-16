@@ -1,0 +1,590 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Cotizador PDF</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <style>
+        #contenedorPDF {
+            position: relative;
+            display: inline-block;
+            margin-top: 20px;
+        }
+
+        .campo {
+            position: absolute;
+            border: 1px solid #333;
+            background-color: rgba(255, 255, 0, 0.3);
+            padding: 2px;
+        }
+
+        .imagen-campo {
+            position: absolute;
+            cursor: move;
+        }
+
+        .imagen-campo .manija {
+            position: absolute;
+            width: 12px;
+            height: 12px;
+            background: #333;
+            right: -6px;
+            bottom: -6px;
+            cursor: nwse-resize;
+        }
+    </style>
+</head>
+<body>
+    <h1>Cotizador de PDF</h1>
+    <p>Sube un PDF para comenzar.</p>
+
+    <form id="formSubir">
+        <input type="file" id="archivoPDF" accept="application/pdf">
+        <button type="submit">Subir PDF</button>
+    </form>
+
+    <p id="resultado"></p>
+
+    <p><em>Clic sobre el PDF: agrega un campo. Clic derecho en un campo: cambia el tamaño de letra. Clic derecho en una imagen: la elimina.</em></p>
+
+    <div id="controlesPagina" style="display: none;">
+        <button id="btnAnterior">← Anterior</button>
+        <span id="infoPagina">Página 1</span>
+        <button id="btnSiguiente">Siguiente →</button>
+    </div>
+
+    <div id="controlesGuardar" style="display: none; margin-top: 10px;">
+        <button id="btnGuardarPDF">💾 Guardar PDF con los datos</button>
+    </div>
+
+    <div id="controlesFirma" style="display: none; margin-top: 10px;">
+        <input type="file" id="archivoFirma" accept="image/*">
+        <button id="btnColocarFirma">🖊️ Colocar firma en el PDF</button>
+        <span id="avisoFirma"></span>
+    </div>
+
+    <div id="controlesPlantilla" style="display: none; margin-top: 10px;">
+        <input type="text" id="nombrePlantilla" placeholder="Nombre de la plantilla (ej: UNSAAC 2026)">
+        <button id="btnGuardarPlantilla">📌 Guardar como plantilla</button>
+
+        <br><br>
+
+        <label for="selectorPlantillas">Usar una plantilla guardada:</label>
+        <select id="selectorPlantillas">
+            <option value="">-- Selecciona una plantilla --</option>
+        </select>
+        <button id="btnAplicarPlantilla">Aplicar plantilla</button>
+    </div>
+
+    <div id="contenedorPDF">
+        <canvas id="lienzoPDF"></canvas>
+    </div>
+
+    <script>
+        pdfjsLib.GlobalWorkerOptions.workerSrc =
+            "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+
+        const ESCALA = 1.5;
+        const TAMANO_POR_DEFECTO = 7;
+
+        const form = document.getElementById("formSubir");
+        const contenedor = document.getElementById("contenedorPDF");
+        const controlesPagina = document.getElementById("controlesPagina");
+        const btnAnterior = document.getElementById("btnAnterior");
+        const btnSiguiente = document.getElementById("btnSiguiente");
+        const infoPagina = document.getElementById("infoPagina");
+
+        const controlesGuardar = document.getElementById("controlesGuardar");
+        const btnGuardarPDF = document.getElementById("btnGuardarPDF");
+
+        const controlesFirma = document.getElementById("controlesFirma");
+        const archivoFirma = document.getElementById("archivoFirma");
+        const btnColocarFirma = document.getElementById("btnColocarFirma");
+        const avisoFirma = document.getElementById("avisoFirma");
+
+        const controlesPlantilla = document.getElementById("controlesPlantilla");
+        const nombrePlantilla = document.getElementById("nombrePlantilla");
+        const btnGuardarPlantilla = document.getElementById("btnGuardarPlantilla");
+        const selectorPlantillas = document.getElementById("selectorPlantillas");
+        const btnAplicarPlantilla = document.getElementById("btnAplicarPlantilla");
+
+        let documentoPDF = null;
+        let paginaActual = 1;
+        let contadorId = 0;
+        let nombreArchivoActual = "";
+
+        let dataUrlFirmaSeleccionada = null;
+        let modoColocarFirma = false;
+
+        const camposPorPagina = {};
+        const imagenesPorPagina = {};
+
+        form.addEventListener("submit", async function (evento) {
+            evento.preventDefault();
+
+            const input = document.getElementById("archivoPDF");
+            const archivo = input.files[0];
+
+            if (!archivo) {
+                alert("Selecciona un PDF primero");
+                return;
+            }
+
+            const datos = new FormData();
+            datos.append("archivo", archivo);
+
+            const respuesta = await fetch("/subir-pdf", {
+                method: "POST",
+                body: datos
+            });
+
+            const resultado = await respuesta.json();
+            document.getElementById("resultado").innerText =
+                "Archivo guardado como: " + resultado.nombre_guardado;
+
+            nombreArchivoActual = resultado.nombre_guardado;
+
+            await cargarPDF("/subidos/" + encodeURIComponent(resultado.nombre_guardado));
+        });
+
+        async function cargarPDF(url) {
+            documentoPDF = await pdfjsLib.getDocument(url).promise;
+            paginaActual = 1;
+
+            for (let i = 1; i <= documentoPDF.numPages; i++) {
+                camposPorPagina[i] = [];
+                imagenesPorPagina[i] = [];
+            }
+
+            controlesPagina.style.display = "block";
+            controlesGuardar.style.display = "block";
+            controlesFirma.style.display = "block";
+            controlesPlantilla.style.display = "block";
+
+            await cargarListaDePlantillas();
+
+            await mostrarPagina(paginaActual);
+        }
+
+        async function mostrarPagina(numeroPagina) {
+            const pagina = await documentoPDF.getPage(numeroPagina);
+
+            const viewport = pagina.getViewport({ scale: ESCALA });
+
+            const canvas = document.getElementById("lienzoPDF");
+            const contexto = canvas.getContext("2d");
+
+            canvas.width = viewport.width;
+            canvas.height = viewport.height;
+
+            await pagina.render({
+                canvasContext: contexto,
+                viewport: viewport
+            }).promise;
+
+            infoPagina.innerText = "Página " + numeroPagina + " de " + documentoPDF.numPages;
+
+            quitarElementosVisuales();
+            dibujarCamposDeLaPagina(numeroPagina);
+            dibujarImagenesDeLaPagina(numeroPagina);
+        }
+
+        function quitarElementosVisuales() {
+            contenedor.querySelectorAll(".campo").forEach(c => c.remove());
+            contenedor.querySelectorAll(".imagen-campo").forEach(i => i.remove());
+        }
+
+        function dibujarCamposDeLaPagina(numeroPagina) {
+            const lista = camposPorPagina[numeroPagina] || [];
+            lista.forEach(datoCampo => crearElementoCampo(datoCampo));
+        }
+
+        function dibujarImagenesDeLaPagina(numeroPagina) {
+            const lista = imagenesPorPagina[numeroPagina] || [];
+            lista.forEach(datoImagen => crearElementoImagen(datoImagen));
+        }
+
+        btnAnterior.addEventListener("click", async function () {
+            if (paginaActual > 1) {
+                paginaActual = paginaActual - 1;
+                await mostrarPagina(paginaActual);
+            }
+        });
+
+        btnSiguiente.addEventListener("click", async function () {
+            if (paginaActual < documentoPDF.numPages) {
+                paginaActual = paginaActual + 1;
+                await mostrarPagina(paginaActual);
+            }
+        });
+
+        contenedor.addEventListener("click", function (evento) {
+            if (evento.target.classList.contains("campo")) {
+                return;
+            }
+            if (evento.target.closest(".imagen-campo")) {
+                return;
+            }
+
+            const rect = contenedor.getBoundingClientRect();
+            const x = evento.clientX - rect.left;
+            const y = evento.clientY - rect.top;
+
+            if (modoColocarFirma) {
+                agregarImagen(x, y);
+            } else {
+                agregarNuevoCampo(x, y);
+            }
+        });
+
+        function agregarNuevoCampo(x, y) {
+            contadorId = contadorId + 1;
+
+            const datoCampo = {
+                id: contadorId,
+                x: x,
+                y: y,
+                valor: "",
+                tamano: TAMANO_POR_DEFECTO
+            };
+
+            camposPorPagina[paginaActual].push(datoCampo);
+            crearElementoCampo(datoCampo);
+        }
+
+        function crearElementoCampo(datoCampo) {
+            if (!datoCampo.tamano) {
+                datoCampo.tamano = TAMANO_POR_DEFECTO;
+            }
+
+            const campo = document.createElement("input");
+            campo.type = "text";
+            campo.className = "campo";
+            campo.style.left = datoCampo.x + "px";
+            campo.style.top = datoCampo.y + "px";
+            campo.style.fontSize = (datoCampo.tamano * ESCALA) + "px";
+            campo.placeholder = "Escribe aquí";
+            campo.value = datoCampo.valor;
+
+            campo.addEventListener("input", function () {
+                datoCampo.valor = campo.value;
+            });
+
+            campo.addEventListener("contextmenu", function (evento) {
+                evento.preventDefault();
+                const nuevoTamano = prompt("Tamaño de letra (número):", datoCampo.tamano);
+                if (nuevoTamano && !isNaN(nuevoTamano)) {
+                    datoCampo.tamano = parseInt(nuevoTamano);
+                    campo.style.fontSize = (datoCampo.tamano * ESCALA) + "px";
+                }
+            });
+
+            hacerArrastrable(campo, datoCampo);
+
+            contenedor.appendChild(campo);
+        }
+
+        function hacerArrastrable(elementoCampo, datoCampo) {
+            let arrastrando = false;
+            let offsetX = 0;
+            let offsetY = 0;
+
+            elementoCampo.addEventListener("mousedown", function (evento) {
+                arrastrando = true;
+                offsetX = evento.offsetX;
+                offsetY = evento.offsetY;
+                evento.stopPropagation();
+            });
+
+            document.addEventListener("mousemove", function (evento) {
+                if (!arrastrando) return;
+
+                const rect = contenedor.getBoundingClientRect();
+                const nuevoX = evento.clientX - rect.left - offsetX;
+                const nuevoY = evento.clientY - rect.top - offsetY;
+
+                elementoCampo.style.left = nuevoX + "px";
+                elementoCampo.style.top = nuevoY + "px";
+
+                datoCampo.x = nuevoX;
+                datoCampo.y = nuevoY;
+            });
+
+            document.addEventListener("mouseup", function () {
+                arrastrando = false;
+            });
+        }
+
+        archivoFirma.addEventListener("change", function () {
+            const archivo = archivoFirma.files[0];
+            if (!archivo) return;
+
+            const lector = new FileReader();
+            lector.onload = function (evento) {
+                dataUrlFirmaSeleccionada = evento.target.result;
+                avisoFirma.innerText = "Firma lista. Haz clic en 'Colocar firma' y luego en el PDF.";
+            };
+            lector.readAsDataURL(archivo);
+        });
+
+        btnColocarFirma.addEventListener("click", function () {
+            if (!dataUrlFirmaSeleccionada) {
+                alert("Primero selecciona una imagen de firma");
+                return;
+            }
+            modoColocarFirma = true;
+            avisoFirma.innerText = "Ahora haz clic sobre el PDF donde quieres poner la firma.";
+        });
+
+        function agregarImagen(x, y) {
+            contadorId = contadorId + 1;
+
+            const datoImagen = {
+                id: contadorId,
+                x: x,
+                y: y,
+                ancho: 150,
+                alto: 80,
+                dataUrl: dataUrlFirmaSeleccionada
+            };
+
+            imagenesPorPagina[paginaActual].push(datoImagen);
+            crearElementoImagen(datoImagen);
+
+            modoColocarFirma = false;
+            avisoFirma.innerText = "";
+        }
+
+        function crearElementoImagen(datoImagen) {
+            const contenedorImg = document.createElement("div");
+            contenedorImg.className = "imagen-campo";
+            contenedorImg.style.left = datoImagen.x + "px";
+            contenedorImg.style.top = datoImagen.y + "px";
+            contenedorImg.style.width = datoImagen.ancho + "px";
+            contenedorImg.style.height = datoImagen.alto + "px";
+
+            const img = document.createElement("img");
+            img.src = datoImagen.dataUrl;
+            img.style.width = "100%";
+            img.style.height = "100%";
+            img.draggable = false;
+
+            const manija = document.createElement("div");
+            manija.className = "manija";
+
+            contenedorImg.appendChild(img);
+            contenedorImg.appendChild(manija);
+            contenedor.appendChild(contenedorImg);
+
+            contenedorImg.addEventListener("contextmenu", function (evento) {
+                evento.preventDefault();
+                const confirmar = confirm("¿Quieres eliminar esta firma/imagen?");
+                if (confirmar) {
+                    contenedorImg.remove();
+                    const lista = imagenesPorPagina[paginaActual];
+                    const indice = lista.indexOf(datoImagen);
+                    if (indice > -1) {
+                        lista.splice(indice, 1);
+                    }
+                }
+            });
+
+            let arrastrando = false;
+            let redimensionando = false;
+            let offsetX = 0;
+            let offsetY = 0;
+
+            contenedorImg.addEventListener("mousedown", function (evento) {
+                if (evento.target === manija) return;
+                arrastrando = true;
+                const rectImg = contenedorImg.getBoundingClientRect();
+                offsetX = evento.clientX - rectImg.left;
+                offsetY = evento.clientY - rectImg.top;
+                evento.stopPropagation();
+            });
+
+            document.addEventListener("mousemove", function (evento) {
+                if (arrastrando) {
+                    const rect = contenedor.getBoundingClientRect();
+                    const nuevoX = evento.clientX - rect.left - offsetX;
+                    const nuevoY = evento.clientY - rect.top - offsetY;
+                    contenedorImg.style.left = nuevoX + "px";
+                    contenedorImg.style.top = nuevoY + "px";
+                    datoImagen.x = nuevoX;
+                    datoImagen.y = nuevoY;
+                }
+                if (redimensionando) {
+                    const rect = contenedorImg.getBoundingClientRect();
+                    const nuevoAncho = evento.clientX - rect.left;
+                    const nuevoAlto = evento.clientY - rect.top;
+                    if (nuevoAncho > 20 && nuevoAlto > 20) {
+                        contenedorImg.style.width = nuevoAncho + "px";
+                        contenedorImg.style.height = nuevoAlto + "px";
+                        datoImagen.ancho = nuevoAncho;
+                        datoImagen.alto = nuevoAlto;
+                    }
+                }
+            });
+
+            document.addEventListener("mouseup", function () {
+                arrastrando = false;
+                redimensionando = false;
+            });
+
+            manija.addEventListener("mousedown", function (evento) {
+                redimensionando = true;
+                evento.stopPropagation();
+            });
+        }
+
+        btnGuardarPDF.addEventListener("click", async function () {
+            const datosParaEnviar = {
+                nombre_archivo: nombreArchivoActual,
+                escala: ESCALA,
+                campos: [],
+                imagenes: []
+            };
+
+            for (const numeroPagina in camposPorPagina) {
+                camposPorPagina[numeroPagina].forEach(campo => {
+                    datosParaEnviar.campos.push({
+                        pagina: parseInt(numeroPagina),
+                        x: campo.x,
+                        y: campo.y,
+                        texto: campo.valor,
+                        tamano: campo.tamano || TAMANO_POR_DEFECTO
+                    });
+                });
+            }
+
+            for (const numeroPagina in imagenesPorPagina) {
+                imagenesPorPagina[numeroPagina].forEach(img => {
+                    datosParaEnviar.imagenes.push({
+                        pagina: parseInt(numeroPagina),
+                        x: img.x,
+                        y: img.y,
+                        ancho: img.ancho,
+                        alto: img.alto,
+                        data_url: img.dataUrl
+                    });
+                });
+            }
+
+            const respuesta = await fetch("/guardar-pdf", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify(datosParaEnviar)
+            });
+
+            if (respuesta.ok) {
+                const blob = await respuesta.blob();
+                const url = window.URL.createObjectURL(blob);
+                const enlace = document.createElement("a");
+                enlace.href = url;
+                enlace.download = "cotizacion_completada.pdf";
+                enlace.click();
+            } else {
+                alert("Hubo un error al generar el PDF");
+            }
+        });
+
+        async function cargarListaDePlantillas() {
+            const respuesta = await fetch("/listar-plantillas");
+            const plantillas = await respuesta.json();
+
+            selectorPlantillas.innerHTML = '<option value="">-- Selecciona una plantilla --</option>';
+
+            plantillas.forEach(plantilla => {
+                const opcion = document.createElement("option");
+                opcion.value = plantilla.archivo;
+                opcion.textContent = plantilla.nombre;
+                selectorPlantillas.appendChild(opcion);
+            });
+        }
+
+        btnGuardarPlantilla.addEventListener("click", async function () {
+            const nombre = nombrePlantilla.value.trim();
+
+            if (!nombre) {
+                alert("Escribe un nombre para la plantilla");
+                return;
+            }
+
+            const campos = [];
+
+            for (const numeroPagina in camposPorPagina) {
+                camposPorPagina[numeroPagina].forEach(campo => {
+                        campos.push({
+                        pagina: parseInt(numeroPagina),
+                        x: campo.x,
+                        y: campo.y,
+                        valor: campo.valor,
+                        tamano: campo.tamano || TAMANO_POR_DEFECTO
+                    });
+                });
+            }
+
+            if (campos.length === 0) {
+                alert("Primero crea al menos un campo sobre el PDF");
+                return;
+            }
+
+            const respuesta = await fetch("/guardar-plantilla", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                    nombre: nombre,
+                    escala: ESCALA,
+                    campos: campos
+                })
+            });
+
+            if (respuesta.ok) {
+                alert("Plantilla guardada correctamente");
+                nombrePlantilla.value = "";
+                await cargarListaDePlantillas();
+            } else {
+                alert("Hubo un error al guardar la plantilla");
+            }
+        });
+
+        btnAplicarPlantilla.addEventListener("click", async function () {
+            const archivoSeleccionado = selectorPlantillas.value;
+
+            if (!archivoSeleccionado) {
+                alert("Selecciona una plantilla primero");
+                return;
+            }
+
+            const respuesta = await fetch("/cargar-plantilla/" + archivoSeleccionado);
+            const plantilla = await respuesta.json();
+
+            for (let i = 1; i <= documentoPDF.numPages; i++) {
+                camposPorPagina[i] = [];
+            }
+
+            plantilla.campos.forEach(campoPlantilla => {
+                contadorId = contadorId + 1;
+
+                const datoCampo = {
+                    id: contadorId,
+                    x: campoPlantilla.x,
+                    y: campoPlantilla.y,
+                    valor: campoPlantilla.valor || "",
+                    tamano: campoPlantilla.tamano || TAMANO_POR_DEFECTO
+                };
+
+                if (camposPorPagina[campoPlantilla.pagina]) {
+                    camposPorPagina[campoPlantilla.pagina].push(datoCampo);
+                }
+            });
+
+            await mostrarPagina(paginaActual);
+        });
+    </script>
+</body>
+</html>

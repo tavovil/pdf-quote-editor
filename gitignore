@@ -1,0 +1,15 @@
+# Client documents and personal data: never publish these
+subidos/
+plantillas/
+
+# Signature images
+*.png
+*.jpg
+*.jpeg
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+.env
